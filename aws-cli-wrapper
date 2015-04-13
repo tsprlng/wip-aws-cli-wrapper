@@ -1,0 +1,84 @@
+#!/usr/bin/env ruby
+# encoding: utf-8
+
+require 'rbconfig'
+require 'open3'
+require 'pp'
+
+MODES = [:read, :read_write]
+
+class UserCancellation < Exception; end
+
+class AwsAccessDenied < StandardError; end
+class AwsNoProfile < StandardError; end
+
+def aws_cli_wrapper
+  if $1 == 'creds'  # a command intended for this wrapper itself (e.g. dump session key, enquire)
+    wrapper_command(ARGV)
+  else
+    wrap_aws_command(ARGV)
+  end
+end
+
+def wrapper_command(args)
+  puts 'Hi! You want me to do something...'
+end
+
+def wrap_aws_command(args)
+  begin
+    # TODO determine correct profile to try from passed profile and command
+    out, err, status = Open3.capture3("aws #{args.join ' '}")
+    try_to_handle err, status
+    
+    STDERR << err
+    STDOUT << out
+    exit status.exitstatus
+  rescue AwsAccessDenied, AwsNoProfile
+    STDERR.puts("Access denied. You will be prompted for your MFA token.")
+    token, mode = prompt(:read, args.join(' '))
+    get_keys(token, mode)
+    retry
+  end
+end
+
+def try_to_handle(stderr, status)  # interpret AWS auth errors into exceptions
+  if status.exitstatus==255 then
+    if stderr =~ /AccessDenied/
+      raise AwsAccessDenied
+    elsif stderr =~ /config profile \(.*?\) could not be found/
+      raise AwsNoProfile
+    end
+  end
+end
+
+def get_keys(token, mode)
+  # TODO TODO TODO
+end
+
+BTN_AUTHENTICATE = "Authenticate"
+BTN_ESCALATE = "Enable writes"
+
+def prompt(mode=:read, command=nil)
+  raise "Please write some code for displaying a dialog on this platform…" unless on_osx
+
+  buttons = if mode==:read_write then
+    %[buttons {"Cancel", "#{BTN_AUTHENTICATE}"} default button 2]
+  else
+    %[buttons {"Cancel", "#{BTN_ESCALATE}", "#{BTN_AUTHENTICATE}"} default button 3]
+  end
+  dialog = `osascript -e 'display dialog "Enter MFA token for AWS:" default answer "" #{buttons}'`
+
+  raise UserCancellation unless $?==0
+
+  response = dialog.match(/^button returned:(.*?), text returned:(.*)$/)
+  token = response[2]
+  mode = response[1]==BTN_ESCALATE ? :read_write : mode
+  
+  [token, mode]
+end
+
+def on_osx
+  !! (RbConfig::CONFIG["host_os"] =~ /darwin/)
+end
+
+aws_cli_wrapper()
